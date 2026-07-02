@@ -191,6 +191,7 @@ def get_connection(cfg, host=None):
     )
 
 
+
 def create_schema(conn, cfg):
     schema = cfg["schema"]["target_schema"]
     cur = conn.cursor()
@@ -584,7 +585,8 @@ def run_destroy(cfg):
     """DROP all managed tables (CASCADE drops projections) and clear backup dirs.
     Full teardown."""
     conn = get_connection(cfg)
-    schema = cfg["schema"]["target_schema"]
+    schema = "public"
+
     try:
         cur = conn.cursor()
         for t in _managed_tables(cfg):

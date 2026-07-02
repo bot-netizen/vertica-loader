@@ -11,12 +11,49 @@ Both Options available, Copy to Disk (optimized) or Copy Directly if no Disk(v1)
 
 ## Contents
 
-| File                        | Purpose |
-|-----------------------------|---------|
-| `vertica_loader_v1.py`      | The loader — discovery, setup, atomic streaming load, audit, archive, cleanup |
-| `test_vertica_loader.py`    | Tests — offline unit tests + opt-in `--live` cluster checks |
-| `config.yaml`               | All settings (connection, nodes, paths, fact + dimension) |
-| `schemas/create_tables.sql` | DDL — fact table, super-projection, dimension table, replicated projection |
+| File                           | Purpose |
+|--------------------------------|---------|
+| `vertica_loader_v1.py`         | V1 loader — streams archives via `COPY FROM STDIN` (no temp disk needed) |
+| `vertica_loader_optimized.py`  | Optimized loader — untars to `/tmp` then `COPY FROM path ON node GZIP` (Python not in data path) |
+| `test_vertica_loader.py`       | Offline unit tests (no Vertica or SSH required) |
+| `config.yaml`                  | All settings (connection, nodes, paths, fact + dimension) |
+| `schemas/create_tables.sql`    | DDL — fact table, super-projection, dimension table, replicated projection |
+
+---
+
+## Loader Comparison: v1 vs Optimized
+
+Two loaders are provided — same interface, same modes, same config — they differ only in how the fact archives are transferred into Vertica.
+
+### Load commands
+
+**V1** (`vertica_loader_v1.py`) — streams the archive through Python into Vertica:
+```bash
+# Python opens a subprocess pipe: ssh | tar | zcat → COPY FROM STDIN
+python vertica_loader_v1.py --config config.yaml --mode load-fact
+```
+
+**Optimized** (`vertica_loader_optimized.py`) — untars on the node first, then Vertica reads directly:
+```bash
+# SSH: tar -xzf archive → /tmp/work/*.gz  →  COPY FROM '/tmp/work/*.gz' ON <node> GZIP
+python vertica_loader_optimized.py --config config.yaml --mode load-fact
+```
+
+All other modes (`setup-tables`, `load-mapping`, `all`, `cleanup-fact`, `destroy`) are identical between the two — use either script.
+
+### Pros and cons
+
+| | V1 (`COPY FROM STDIN`) | Optimized (`COPY FROM path ON node`) |
+|---|---|---|
+| **Python in data path** | Yes — every byte flows through the Python process | No — Vertica reads files directly from node disk |
+| **Temp disk required** | No — streams on the fly | Yes — needs `/tmp` space (~= one uncompressed archive) |
+| **Corrupt-tar detection** | `proc.wait()` + `pipefail` checked before commit | SSH untar fails → exception → rollback |
+| **CPU on coordinator** | Higher — Python buffers + forwards the stream | Lower — only SSH + SQL, no data buffering |
+| **Throughput ceiling** | Coordinator NIC + Python GIL (I/O-bound releases GIL) | Node-local disk I/O → Vertica's internal GZIP parser |
+| **Best for** | Nodes with no spare disk, or small clusters | Standard production use — higher throughput per node |
+| **Reject tables on destroy** | Dropped (same schema as target) | Dropped (same schema as target) |
+
+**Recommendation:** use the **optimized** loader for production. Fall back to **v1** only if `/tmp` space is too tight to hold an uncompressed archive (rare with GSOD-sized archives).
 
 ---
 

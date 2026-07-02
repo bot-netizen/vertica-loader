@@ -10,7 +10,7 @@ Run:
 import unittest
 from unittest import mock
 
-import vertica_loader as vl
+import vertica_loader_optimized as vl
 
 
 # A minimal, valid config used by every test.
