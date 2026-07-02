@@ -1,24 +1,22 @@
-# NOAA GSOD — Vertica Multi-Node Loader
+# NVertica Multi-Node Loader
 
-Loads the NOAA GSOD (Global Surface Summary of the Day) weather dataset into a
-multi-node Vertica cluster. Fact data arrives as `.tar.gz` archives on each node
+Loads the NOAA  weather dataset into a  multi-node Vertica cluster. Fact data arrives as `.tar.gz` archives on each node
 (each archive ≈ 300 headerless, tab-delimited TSV members that are themselves
 gzip-compressed — two gzip layers); the loader streams each archive straight into
-one atomic `COPY ... FROM STDIN` — no untar to disk — and rolls the whole archive
-back on any failure. A small replicated dimension table (`weather_station`) is
-loaded at setup.
+one atomic `COPY ... FROM STDIN` 
+
+Both Options available, Copy to Disk (optimized) or Copy Directly if no Disk(v1).
 
 ---
 
 ## Contents
 
-| File | Purpose |
-|------|---------|
-| `vertica_loader.py` | The loader — discovery, setup, atomic streaming load, audit, archive, cleanup |
-| `test_vertica_loader.py` | Tests — offline unit tests + opt-in `--live` cluster checks |
-| `config.yaml` | All settings (connection, nodes, paths, fact + dimension) |
+| File                        | Purpose |
+|-----------------------------|---------|
+| `vertica_loader_v1.py`      | The loader — discovery, setup, atomic streaming load, audit, archive, cleanup |
+| `test_vertica_loader.py`    | Tests — offline unit tests + opt-in `--live` cluster checks |
+| `config.yaml`               | All settings (connection, nodes, paths, fact + dimension) |
 | `schemas/create_tables.sql` | DDL — fact table, super-projection, dimension table, replicated projection |
-| `queries/top10_hottest.sql` | The goal query (top 10 hottest places on average) |
 
 ---
 
@@ -34,15 +32,15 @@ loaded at setup.
 ## How it works (the flow)
 
 ```
-SETUP    (--mode setup-tables)          [ all runs SETUP → MAPPING → LOAD ]
+SETUP                                   (--mode setup-tables)          [ all runs SETUP → MAPPING → LOAD ]
   create_schema                         create the target schema
-  create_tables    ← create_tables.sql  weather_fact, projections, weather_station, load_audit
+  create_tables                         ← create_tables.sql  weather_fact, projections, weather_station, load_audit
   validate_objects                      confirm target + audit tables exist
 
 MAPPING  (--mode load-mapping)
   load_dimension   ← weather_station.tsv  full-refresh the replicated mapping table
 
-LOAD     (--mode load-fact)
+LOAD                                    (--mode load-fact)
   list_files_on_nodes                   SSH ls  *.tar.gz on every node
   build_manifest                        one entry per archive (archive ↔ node)
   filter_already_loaded                 skip archives already OK in load_audit
@@ -105,13 +103,12 @@ ssh_run(cfg, host, f"rm -rf {work_dir}")
 # Any exception in steps 1-2 is caught → conn.rollback(); nothing lands
 ```
 
-So a tar that fails halfway can never leave half its ~300 members committed.
-Bad **rows** (sentinels, a stray header) are not failures — they are captured in
+So a tar that fails halfway can never leave half its  members committed.
+Bad **rows** (sentinels, a stray header) are not failures, they are captured in
 the per-stream reject table and the load still commits, **up to `max_bad_records`
 (REJECTMAX)**; reaching that limit aborts the COPY and rolls the whole archive
-back. A failed archive is logged with the real error, left in place (not
-archived), and retried next run. Each archive is its own transaction, so one bad
-archive rolls back only itself — the others keep going.
+back. 
+
 
 ## Parallelism
 
@@ -130,45 +127,7 @@ released and the threads run genuinely in parallel.
 
 ---
 
-## Configuration
 
-Edit `config.yaml`:
-
-```yaml
-vertica:   { host, port, user, password, database }   # DB pre-created by you
-cluster:
-  ssh_user: dbadmin
-  nodes:                       # ssh_host = OS host, db_node = Vertica node name
-    - {ssh_host: 10.11.12.10, db_node: v_verticadb_node0001}
-    - ...
-paths:
-  source_dir: /data/incoming
-  backup_dir: /data/backup
-  file_glob: "*.tar.gz"
-  archive_loaded: true         # move loaded files to backup_dir (+.archived);
-                               # false = leave in place (audit table still dedups)
-schema:  { target_schema: public, schema_files: ./schemas }
-load:
-  target_table: weather_fact
-  reject_table: weather_fact_rej
-  audit_table:  load_audit
-  delimiter: "\\t"             # placed inside E'...'; use \\t for TAB
-  max_bad_records: 0           # COPY REJECTMAX; 0 = unlimited (never fail on bad rows)
-  check_duplicates: true       # audit-table dedup; false = reload same files (testing only)
-  max_parallel_loads: 3        # archives loaded at once (defaults to node count)
-dimension:                     # replicated mapping table
-  enabled: true
-  table: weather_station
-  ssh_host: 10.11.12.10        # node holding the .tsv
-  file: /data/incoming/weather_station.tsv
-  delimiter: "\\t"
-  skip: 1                      # file has a header
-```
-
-Find your Vertica node names with:
-```sql
-SELECT node_name FROM nodes ORDER BY node_name;
-```
 
 ---
 
@@ -189,8 +148,7 @@ Applied automatically at setup (the loader sets `SEARCH_PATH` to
 - **`weather_station`** + **`weather_station_rep`** — dimension table and its
   `UNSEGMENTED ALL NODES` (replicated) projection, so the join never broadcasts.
 
-> Column order in `weather_fact` must match the TSV exactly — see the validated
-> 30-column field map in the dataset handoff.
+> Column order in `weather_fact` must match the TSV exactly 
 
 ---
 
@@ -199,13 +157,13 @@ Applied automatically at setup (the loader sets `SEARCH_PATH` to
 ```bash
 pip install pyyaml vertica-python
 
-python vertica_loader.py --config config.yaml --mode all           # setup + mapping + fact
-python vertica_loader.py --config config.yaml --mode setup-tables  # DDL only (no data)
-python vertica_loader.py --config config.yaml --mode load-mapping  # load dimension table only
-python vertica_loader.py --config config.yaml --mode load-fact     # load fact archives only
-python vertica_loader.py --config config.yaml --mode load-fact --dry-run   # show plan, no changes
-python vertica_loader.py --config config.yaml --mode cleanup-fact  # TRUNCATE fact + reject (keep audit + dimension)
-python vertica_loader.py --config config.yaml --mode destroy       # DROP all tables + clear backups
+python vertica_loader_v1.py --config config.yaml --mode all           # setup + mapping + fact
+python vertica_loader_v1.py --config config.yaml --mode setup-tables  # DDL only (no data)
+python vertica_loader_v1.py --config config.yaml --mode load-mapping  # load dimension table only
+python vertica_loader_v1.py --config config.yaml --mode load-fact     # load fact archives only
+python vertica_loader_v1.py --config config.yaml --mode load-fact --dry-run   # show plan, no changes
+python vertica_loader_v1.py --config config.yaml --mode cleanup-fact  # TRUNCATE fact + reject (keep audit + dimension)
+python vertica_loader_v1.py --config config.yaml --mode destroy       # DROP all tables + clear backups
 ```
 
 | Mode | Does |
@@ -243,24 +201,7 @@ v_verticadb_node0002   | batch02.tar.gz   | batch02.tar.gz.archived
 
 ## Corrupt records & missing-value sentinels
 
-Bad rows are diverted to `weather_fact_rej` (`REJECTED DATA AS TABLE`) — they don't fail
-the load, **up to the bad-record limit**. `load.max_bad_records` maps to COPY
-`REJECTMAX`: an archive tolerates that many rejected rows and still commits;
-reaching the limit aborts the COPY and rolls the **whole archive** back (it's
-left in place and reported as `FAILED`). `0` = unlimited. After the first load,
-check the reject table:
-
-```sql
-SELECT COUNT(*) FROM weather_fact_rej;
-SELECT rejected_reason, rejected_data FROM weather_fact_rej LIMIT 20;
-```
-Likely causes: a member carrying a header line, or blank `''` numeric fields.
-
-GSOD uses **no NULLs in-file** — missing values are per-column sentinels
-(`temp/dewp/max/min/slp/stp = 9999.9`, `visib/wdsp/mxspd/gust/sndp = 999.9`,
-`prcp = 99.99`). They are loaded as-is and stripped per column with `NULLIF` in
-queries (see `queries/top10_hottest.sql`). A single global `NULL` token on COPY
-would be wrong.
+Bad rows are diverted to a per-stream reject table, 
 
 ---
 
